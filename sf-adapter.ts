@@ -3,6 +3,34 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 const ARK_API_URL = "https://ark.cn-beijing.volces.com/api/v3/images/generations";
 const SILICONFLOW_API_URL = "https://api.siliconflow.cn/v1/images/generations";
 
+const JSON_HEADERS = {
+  "Content-Type": "application/json",
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST, GET, OPTIONS, HEAD",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+};
+
+const AVAILABLE_MODELS = [
+  {
+    id: "Qwen/Qwen-Image",
+    object: "model",
+    created: Date.UTC(2024, 0, 1) / 1000,
+    owned_by: "siliconflow",
+  },
+  {
+    id: "Kwai-Kolors/Kolors",
+    object: "model",
+    created: Date.UTC(2024, 0, 1) / 1000,
+    owned_by: "siliconflow",
+  },
+  {
+    id: "doubao-seedream-4-0-250828",
+    object: "model",
+    created: Date.UTC(2024, 0, 1) / 1000,
+    owned_by: "ark",
+  },
+];
+
 type ChatMessage = {
   role: string;
   content: string | Array<Record<string, unknown>>;
@@ -52,17 +80,17 @@ function coerceMessagePayload(messages: ChatMessage[]): ProviderPayload {
       payload.prompt = content.trim();
     } else if (Array.isArray(content)) {
       for (const chunk of content) {
-        const type = chunk?.type;
-        if (type === "text" && typeof chunk.text === "string") {
-          payload.prompt = chunk.text.trim();
+        const type = (chunk as { type?: unknown }).type;
+        if (type === "text" && typeof (chunk as { text?: unknown }).text === "string") {
+          payload.prompt = ((chunk as { text: string }).text).trim();
         }
         if (
           type === "image_url" &&
-          typeof chunk.image_url === "object" &&
-          chunk.image_url &&
-          typeof (chunk.image_url as { url?: unknown }).url === "string"
+          typeof (chunk as { image_url?: unknown }).image_url === "object" &&
+          (chunk as { image_url?: Record<string, unknown> }).image_url &&
+          typeof ((chunk as { image_url: { url?: unknown } }).image_url.url) === "string"
         ) {
-          const url = (chunk.image_url as { url: string }).url;
+          const url = (chunk as { image_url: { url: string } }).image_url.url;
           if (url.startsWith("data:")) {
             payload.dataUrls.push(url);
           } else {
@@ -121,35 +149,43 @@ async function callArk(apiKey: string, requestBody: OpenAIRequest, payload: Prov
     const errorText = await res.text();
     throw new Response(JSON.stringify({ error: errorText }), {
       status: res.status,
-      headers: { "Content-Type": "application/json" },
+      headers: JSON_HEADERS,
     });
   }
 
   const arkData = await res.json();
   const images = Array.isArray(arkData?.data)
-    ? arkData.data.map((img: Record<string, unknown>) => {
-        const url = typeof img?.url === "string"
-          ? img.url
-          : typeof img?.b64_json === "string"
-            ? `data:image/png;base64,${img.b64_json}`
-            : undefined;
-        if (!url) return undefined;
-        return {
-          image_url: { url },
-          size: typeof img?.size === "string" ? img.size : undefined,
-        };
-      }).filter(Boolean)
+    ? arkData.data
+        .map((img: Record<string, unknown>) => {
+          const url = typeof img?.url === "string"
+            ? img.url
+            : typeof img?.b64_json === "string"
+              ? `data:image/png;base64,${img.b64_json}`
+              : undefined;
+          if (!url) return undefined;
+          return {
+            image_url: { url },
+            size: typeof img?.size === "string" ? img.size : undefined,
+          };
+        })
+        .filter(Boolean)
     : [];
 
   return {
     data: images,
     usage: arkData?.usage,
-    created: typeof arkData?.created === "number" ? arkData.created : Math.floor(Date.now() / 1000),
+    created: typeof arkData?.created === "number"
+      ? arkData.created
+      : Math.floor(Date.now() / 1000),
     model: arkModel,
   };
 }
 
-async function callSiliconFlow(apiKey: string, requestBody: OpenAIRequest, payload: ProviderPayload) {
+async function callSiliconFlow(
+  apiKey: string,
+  requestBody: OpenAIRequest,
+  payload: ProviderPayload,
+) {
   const model = requestBody.model ?? "Qwen/Qwen-Image";
   const n = clamp(typeof requestBody.n === "number" ? requestBody.n : 1, 1, 4);
   const body: Record<string, unknown> = {
@@ -160,25 +196,35 @@ async function callSiliconFlow(apiKey: string, requestBody: OpenAIRequest, paylo
 
   const overrideSize = typeof requestBody.size === "string"
     ? requestBody.size
-    : typeof requestBody.image_size === "string"
-      ? requestBody.image_size
+    : typeof (requestBody as { image_size?: unknown }).image_size === "string"
+      ? (requestBody as { image_size: string }).image_size
       : undefined;
   body.image_size = overrideSize ?? (model.startsWith("Kwai-Kolors/") ? "1024x1024" : "1328x1328");
 
-  const negative = typeof requestBody.negative_prompt === "string" ? requestBody.negative_prompt : undefined;
+  const negative = typeof (requestBody as { negative_prompt?: unknown }).negative_prompt === "string"
+    ? (requestBody as { negative_prompt: string }).negative_prompt
+    : undefined;
   if (negative) body.negative_prompt = negative;
 
   if (typeof requestBody.seed === "number") {
     body.seed = clamp(requestBody.seed, 0, 9_999_999_999);
   }
-  if (typeof requestBody.num_inference_steps === "number") {
-    body.num_inference_steps = clamp(requestBody.num_inference_steps, 1, 100);
+  if (typeof (requestBody as { num_inference_steps?: unknown }).num_inference_steps === "number") {
+    body.num_inference_steps = clamp(
+      (requestBody as { num_inference_steps: number }).num_inference_steps,
+      1,
+      100,
+    );
   }
-  if (typeof requestBody.guidance_scale === "number") {
-    body.guidance_scale = clamp(requestBody.guidance_scale, 0, 20);
+  if (typeof (requestBody as { guidance_scale?: unknown }).guidance_scale === "number") {
+    body.guidance_scale = clamp(
+      (requestBody as { guidance_scale: number }).guidance_scale,
+      0,
+      20,
+    );
   }
-  if (typeof requestBody.cfg === "number") {
-    body.cfg = clamp(requestBody.cfg, 0.1, 20);
+  if (typeof (requestBody as { cfg?: unknown }).cfg === "number") {
+    body.cfg = clamp((requestBody as { cfg: number }).cfg, 0.1, 20);
   }
 
   if (payload.dataUrls.length > 0) {
@@ -198,21 +244,23 @@ async function callSiliconFlow(apiKey: string, requestBody: OpenAIRequest, paylo
     const text = await res.text();
     throw new Response(JSON.stringify({ error: text }), {
       status: res.status,
-      headers: { "Content-Type": "application/json" },
+      headers: JSON_HEADERS,
     });
   }
 
   const data = await res.json();
   const images = Array.isArray(data?.images)
-    ? data.images.map((img: Record<string, unknown>) => {
-        const url = typeof img?.url === "string"
-          ? img.url
-          : typeof img?.b64_json === "string"
-            ? `data:image/png;base64,${img.b64_json}`
-            : undefined;
-        if (!url) return undefined;
-        return { image_url: { url } };
-      }).filter(Boolean)
+    ? data.images
+        .map((img: Record<string, unknown>) => {
+          const url = typeof img?.url === "string"
+            ? img.url
+            : typeof img?.b64_json === "string"
+              ? `data:image/png;base64,${img.b64_json}`
+              : undefined;
+          if (!url) return undefined;
+          return { image_url: { url } };
+        })
+        .filter(Boolean)
     : [];
 
   return {
@@ -226,17 +274,10 @@ async function callSiliconFlow(apiKey: string, requestBody: OpenAIRequest, paylo
 }
 
 async function handleChatCompletions(req: Request): Promise<Response> {
-  const url = new URL(req.url);
-  if (url.pathname !== "/v1/chat/completions") {
-    return new Response(JSON.stringify({ error: "Not found" }), {
-      status: 404,
-      headers: { "Content-Type": "application/json" },
-    });
-  }
   if (req.method !== "POST") {
     return new Response(JSON.stringify({ error: "Method not allowed" }), {
       status: 405,
-      headers: { "Content-Type": "application/json" },
+      headers: JSON_HEADERS,
     });
   }
 
@@ -245,7 +286,7 @@ async function handleChatCompletions(req: Request): Promise<Response> {
     if (!Array.isArray(requestBody.messages) || requestBody.messages.length === 0) {
       return new Response(JSON.stringify({ error: "messages 字段不能为空" }), {
         status: 400,
-        headers: { "Content-Type": "application/json" },
+        headers: JSON_HEADERS,
       });
     }
 
@@ -260,7 +301,7 @@ async function handleChatCompletions(req: Request): Promise<Response> {
     if (!apiKey) {
       return new Response(JSON.stringify({ error: "缺少 API Key" }), {
         status: 401,
-        headers: { "Content-Type": "application/json" },
+        headers: JSON_HEADERS,
       });
     }
 
@@ -289,12 +330,7 @@ async function handleChatCompletions(req: Request): Promise<Response> {
     };
 
     return new Response(JSON.stringify(openAIResponse), {
-      headers: {
-        "Content-Type": "application/json",
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type, Authorization",
-      },
+      headers: JSON_HEADERS,
     });
   } catch (err) {
     if (err instanceof Response) return err;
@@ -306,26 +342,71 @@ async function handleChatCompletions(req: Request): Promise<Response> {
       },
     }), {
       status: 500,
-      headers: { "Content-Type": "application/json" },
+      headers: JSON_HEADERS,
     });
   }
 }
 
 async function handleOptions(): Promise<Response> {
   return new Response(null, {
-    headers: {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type, Authorization",
-    },
+    headers: JSON_HEADERS,
   });
 }
 
 async function handler(req: Request): Promise<Response> {
+  const url = new URL(req.url);
+
   if (req.method === "OPTIONS") {
     return handleOptions();
   }
-  return handleChatCompletions(req);
+
+  if (req.method === "GET" || req.method === "HEAD") {
+    if (url.pathname === "/" || url.pathname === "/healthz") {
+      return req.method === "HEAD"
+        ? new Response(null, { headers: JSON_HEADERS })
+        : new Response(JSON.stringify({ status: "ok" }), {
+          headers: JSON_HEADERS,
+        });
+    }
+
+    if (url.pathname === "/v1/chat/completions") {
+      return req.method === "HEAD"
+        ? new Response(null, { headers: JSON_HEADERS })
+        : new Response(JSON.stringify({
+          status: "ok",
+          message: "Use POST with OpenAI Chat schema to generate images.",
+        }), {
+          headers: JSON_HEADERS,
+        });
+    }
+
+    if (url.pathname === "/v1/models") {
+      return req.method === "HEAD"
+        ? new Response(null, { headers: JSON_HEADERS })
+        : new Response(JSON.stringify({
+          object: "list",
+          data: AVAILABLE_MODELS,
+        }), {
+          headers: JSON_HEADERS,
+        });
+    }
+  }
+
+  if (url.pathname === "/v1/models") {
+    return new Response(JSON.stringify({ error: "Method not allowed" }), {
+      status: 405,
+      headers: JSON_HEADERS,
+    });
+  }
+
+  if (url.pathname === "/v1/chat/completions") {
+    return handleChatCompletions(req);
+  }
+
+  return new Response(JSON.stringify({ error: "Not found" }), {
+    status: 404,
+    headers: JSON_HEADERS,
+  });
 }
 
 const port = Number(Deno.env.get("PORT") ?? 8000);
